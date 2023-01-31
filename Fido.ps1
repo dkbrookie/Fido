@@ -1,6 +1,6 @@
 ﻿#
-# Fido v1.31 - Feature ISO Downloader, for retail Windows images and UEFI Shell
-# Copyright © 2019-2022 Pete Batard <pete@akeo.ie>
+# Fido v1.41 - Feature ISO Downloader, for retail Windows images and UEFI Shell
+# Copyright © 2019-2023 Pete Batard <pete@akeo.ie>
 # Command line support: Copyright © 2021 flx5
 # ConvertTo-ImageSource: Copyright © 2016 Chris Carter
 #
@@ -24,7 +24,7 @@
 #region Parameters
 param(
 	# (Optional) The title to display on the application window.
-	[string]$AppTitle = "Fido - Retail Windows ISO Downloader",
+	[string]$AppTitle = "Fido - Feature ISO Downloader",
 	# (Optional) '|' separated UI localization strings.
 	[string]$LocData,
 	# (Optional) Path to a file that should be used for the UI icon.
@@ -45,7 +45,9 @@ param(
 	# (Optional) Only display the download URL [Toggles commandline mode]
 	[switch]$GetUrl = $False,
 	# (Optional) Increase verbosity
-	[switch]$Verbose = $False
+	[switch]$Verbose = $False,
+	# (Optional) Disable the progress bar
+	[switch]$DisableProgress = $False
 )
 #endregion
 
@@ -80,11 +82,12 @@ $code = @"
 
 if (!$Cmd) {
 	Write-Host Please Wait...
+	$Drawing_Assembly = "System.Drawing"
+	# PowerShell 7 altered the name of the Drawing assembly...
 	if ($host.version -ge "7.0") {
-		Add-Type -WarningAction Ignore -IgnoreWarnings -MemberDefinition $code -Namespace Gui -UsingNamespace System.Runtime, System.IO, System.Text, System.Drawing, System.Globalization -ReferencedAssemblies System.Drawing.Common -Name Utils -ErrorAction Stop
-	} else {
-		Add-Type -MemberDefinition $code -Namespace Gui -UsingNamespace System.IO, System.Text, System.Drawing, System.Globalization -ReferencedAssemblies System.Drawing -Name Utils -ErrorAction Stop
+		$Drawing_Assembly += ".Common"
 	}
+	Add-Type -ErrorAction Stop -WarningAction Ignore -IgnoreWarnings -MemberDefinition $code -Namespace Gui -UsingNamespace System.Runtime, System.IO, System.Text, System.Drawing, System.Globalization -ReferencedAssemblies $Drawing_Assembly -Name Utils
 	Add-Type -AssemblyName PresentationFramework
 	# Hide the powershell window: https://stackoverflow.com/a/27992426/1069307
 	[Gui.Utils]::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0) | Out-Null
@@ -98,6 +101,11 @@ $WindowsVersions = @(
 	@(
 		@("Windows 11", "windows11"),
 		@(
+			"22H2 v1 (Build 22621.525 - 2022.10)",
+			@("Windows 11 Home/Pro/Edu", 2370),
+			@("Windows 11 Home China ", ($zh + 2371))
+		),
+		@(
 			"21H2 v1 (Build 22000.318 - 2021.11)",
 			@("Windows 11 Home/Pro/Edu", 2093),
 			@("Windows 11 Home China ", ($zh + 2094))
@@ -110,6 +118,11 @@ $WindowsVersions = @(
 	),
 	@(
 		@("Windows 10", "Windows10ISO"),
+		@(
+			"22H2 (Build 19045.2006 - 2022.10)",
+			@("Windows 10 Home/Pro/Edu", 2377),
+			@("Windows 10 Home China ", ($zh + 2378))
+		),
 		@(
 			"21H2 (Build 19044.1288 - 2021.11)",
 			@("Windows 10 Home/Pro/Edu", 2084),
@@ -273,6 +286,11 @@ $WindowsVersions = @(
 	),
 	@(
 		@("UEFI Shell 2.2", "UEFI_SHELL 2.2"),
+		@(
+			"22H2 (edk2-stable202211)",
+			@("Release", 0),
+			@("Debug", 1)
+		),
 		@(
 			"22H1 (edk2-stable202205)",
 			@("Release", 0),
@@ -481,7 +499,7 @@ function ConvertTo-ImageSource
 
 function Throw-Error([object]$Req, [string]$Alt)
 {
-	$Err = $(GetElementById -Request $r -Id "errorModalMessage").innerText
+	$Err = $(GetElementById -Request $Req -Id "errorModalMessage").innerText -replace "<[^>]+>" -replace "\s+", " "
 	if (-not $Err) {
 		$Err = $Alt
 	} else {
@@ -584,7 +602,7 @@ $RequestData["GetLangs"] = @("a8f8f489-4c7f-463a-9ca6-5cff94d8d041", "getskuinfo
 # This GUID applies to visitors of the en-US download page. Other locales may get a different GUID.
 $RequestData["GetLinks"] = @("6e2a1789-ef16-4f27-a296-74ef7ef5d96b", "GetProductDownloadLinksBySku" )
 # Create a semi-random Linux User-Agent string
-$FirefoxVersion = Get-Random -Minimum 50 -Maximum 90
+$FirefoxVersion = Get-Random -Minimum 90 -Maximum 110
 $FirefoxDate = Get-RandomDate
 $UserAgent = "Mozilla/5.0 (X11; Linux i586; rv:$FirefoxVersion.0) Gecko/$FirefoxDate Firefox/$FirefoxVersion.0"
 $Verbosity = 2
@@ -599,7 +617,7 @@ if ($Cmd) {
 
 # Localization
 $EnglishMessages = "en-US|Version|Release|Edition|Language|Architecture|Download|Continue|Back|Close|Cancel|Error|Please wait...|" +
-	"Download using a browser|Temporarily banned by Microsoft for requesting too many downloads - Please try again later...|" +
+	"Download using a browser|Download of Windows ISOs is unavailable due to Microsoft having altered their website to prevent it.|" +
 	"PowerShell 3.0 or later is required to run this script.|Do you want to go online and download it?"
 [string[]]$English = $EnglishMessages.Split('|')
 [string[]]$Localized = $null
@@ -692,6 +710,17 @@ function Get-Windows-Languages([int]$SelectedVersion, [int]$SelectedEdition)
 	} elseif ($WindowsVersions[$SelectedVersion][0][1].StartsWith("UEFI_SHELL")) {
 		$languages += @(New-Object PsObject -Property @{ DisplayLanguage = "English (US)"; Language = "en-us"; Id = 0 })
 	} else {
+		# Microsoft download protection now requires the sessionId to be whitelisted through vlscppe.microsoft.com/tags
+		$url = "https://vlscppe.microsoft.com/tags?org_id=y6jn8c31&session_id=" + $SessionId
+		if ($Verbosity -ge 2) {
+			Write-Host Querying $url
+		}
+		try {
+			Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -UserAgent $UserAgent $url | Out-Null
+		} catch {
+			Error($_.Exception.Message)
+			return @()
+		}
 		$url = "https://www.microsoft.com/" + $QueryLocale + "/api/controls/contentinclude/html"
 		$url += "?pageId=" + $RequestData["GetLangs"][0]
 		$url += "&host=www.microsoft.com"
@@ -706,11 +735,12 @@ function Get-Windows-Languages([int]$SelectedVersion, [int]$SelectedEdition)
 
 		$script:SelectedIndex = 0
 		try {
-			$r = Invoke-WebRequest -UseBasicParsing -UserAgent $UserAgent -SessionVariable "Session" $url
+			$r = Invoke-WebRequest -Method Post -UseBasicParsing -UserAgent $UserAgent -SessionVariable "Session" $url
 			if ($r -match "errorModalMessage") {
 				Throw-Error -Req $r -Alt "Could not retrieve languages from server"
 			}
-			$pattern = '(?s)<select id="product-languages">(.*)?</select>'
+			$r = $r -replace "`n" -replace "`r"
+			$pattern = '.*<select id="product-languages"[^>]+>(.*)</select>.*'
 			$html = [regex]::Match($r, $pattern).Groups[1].Value
 			# Go through an XML conversion to keep all PowerShells happy...
 			$html = $html.Replace("selected value", "value")
@@ -793,11 +823,28 @@ function Get-Windows-Download-Links([int]$SelectedVersion, [int]$SelectedRelease
 
 		try {
 			$Is64 = [Environment]::Is64BitOperatingSystem
-			# Must add a referer for POST requests, else Microsoft's servers will deny them
+			# Must add a referer for this request, else Microsoft's servers will deny it
 			$ref = "https://www.microsoft.com/software-download/windows11"
-			$r = Invoke-WebRequest -Method Post -Headers @{"Referer" = $ref} -UseBasicParsing -UserAgent $UserAgent -WebSession $Session $url
+			$wr = [System.Net.WebRequest]::Create($url)
+			# Windows 7 PowerShell doesn't support 'Invoke-WebRequest -Headers @{"Referer" = $ref}'
+			# (produces "The 'Referer' header must be modified using the appropriate property or method")
+			# so we use StreamReader() with GetResponseStream() and do this whole gymkhana instead...
+			$wr.Method = "POST"
+			$wr.Referer = $ref
+			$wr.UserAgent = $UserAgent
+			$wr.ContentLength = 0
+			$sr = New-Object System.IO.StreamReader($wr.GetResponse().GetResponseStream())
+			$r = $sr.ReadToEnd()
 			if ($r -match "errorModalMessage") {
-				Throw-Error -Req $r -Alt "Could not retrieve architectures from server"
+				$regex = New-Object Text.RegularExpressions.Regex '<p id="errorModalMessage">(.+?)<\/p>'
+				$m = $regex.Match($r)
+				# Make the typical error message returned by Microsoft's servers more presentable
+				$Alt = $m.Groups[1] -replace "<[^>]+>" -replace "\s+", " "
+				$Alt += " " + $SessionId + "."
+				if (-not $Alt) {
+					$Alt = "Could not retrieve architectures from server"
+				}
+				Throw-Error -Req $r -Alt $Alt
 			}
 			$pattern = '(?s)(<input.*?></input>)'
 			ForEach-Object { [regex]::Matches($r, $pattern) } | ForEach-Object { $html += $_.Groups[1].value }
@@ -871,6 +918,9 @@ function Process-Download-Link([string]$Url)
 				$tmp_size = [uint64]::Parse($str_size)
 				$Size = Size-To-Human-Readable $tmp_size
 				Write-Host "Downloading '$File' ($Size)..."
+				if ($DisableProgress) {
+					$ProgressPreference = 'SilentlyContinue'
+				}
 				Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $File
 			} else {
 				Write-Host Download Link: $Url
@@ -952,7 +1002,7 @@ if ($Cmd) {
 			if (!$Ed -and $Verbosity -ge 1) {
 				Write-Host "No edition specified (-Ed). Defaulting to '$($edition.Edition)'."
 			}
-			$Selected += "," + $edition.Edition -replace "Windows [0-9\.]*", ""
+			$Selected += "," + $edition.Edition -replace "Windows [0-9\.]*"
 			$winEditionId = $edition.Id
 			break;
 		}
@@ -972,6 +1022,10 @@ if ($Cmd) {
 	}
 	if ($Lang -eq "List") {
 		Write-Host "Please select a Language (-Lang) for ${Selected}:"
+	} elseif ($Lang) {
+		# Escape parentheses so that they aren't interpreted as regex
+		$Lang = $Lang.replace('(', '\(')
+		$Lang = $Lang.replace(')', '\)')
 	}
 	$i = 0
 	foreach ($language in $languages) {
@@ -988,7 +1042,7 @@ if ($Cmd) {
 		}
 		$i++
 	}
-	if ($winLanguageId -eq $null -or $winLanguageName -eq $null) {
+	if (!$winLanguageId -or !$winLanguageName) {
 		if ($Lang -ne "List") {
 			Write-Host "Invalid Windows language provided."
 			Write-Host "Use '-Lang List' for a list of available languages or remove the option to use system default."
@@ -1045,7 +1099,7 @@ $XMLForm.Title = $AppTitle
 if ($Icon) {
 	$XMLForm.Icon = $Icon
 } else {
-	$XMLForm.Icon = [Gui.Utils]::ExtractIcon("shell32.dll", -41, $true) | ConvertTo-ImageSource
+	$XMLForm.Icon = [Gui.Utils]::ExtractIcon("imageres.dll", -5205, $true) | ConvertTo-ImageSource
 }
 if ($Locale.StartsWith("ar") -or $Locale.StartsWith("fa") -or $Locale.StartsWith("he")) {
 	$XMLForm.FlowDirection = "RightToLeft"
@@ -1183,8 +1237,8 @@ exit $ExitCode
 # SIG # Begin signature block
 # MIIkWAYJKoZIhvcNAQcCoIIkSTCCJEUCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAiZT+pEprxewVE
-# +Vpi/MqR7ClFwopa4p2nE7rw5/vvS6CCElkwggVvMIIEV6ADAgECAhBI/JO0YFWU
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCyA1DxwYegKJ2C
+# H681zwD4uu1/m7nOUczTmgbYeIwE0KCCElkwggVvMIIEV6ADAgECAhBI/JO0YFWU
 # jTanyYqJ1pQWMA0GCSqGSIb3DQEBDAUAMHsxCzAJBgNVBAYTAkdCMRswGQYDVQQI
 # DBJHcmVhdGVyIE1hbmNoZXN0ZXIxEDAOBgNVBAcMB1NhbGZvcmQxGjAYBgNVBAoM
 # EUNvbW9kbyBDQSBMaW1pdGVkMSEwHwYDVQQDDBhBQUEgQ2VydGlmaWNhdGUgU2Vy
@@ -1287,22 +1341,22 @@ exit $ExitCode
 # aWMgQ29kZSBTaWduaW5nIENBIEVWIFIzNgIRAL+xUAG79ZLUlip3l+pzb6MwDQYJ
 # YIZIAWUDBAIBBQCgfDAQBgorBgEEAYI3AgEMMQIwADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAvBgkqhkiG
-# 9w0BCQQxIgQg4dhURk9h2CUZOUvA++UydKpA1JdF0+LNfeUwXIsUntYwDQYJKoZI
-# hvcNAQEBBQAEggIAFd7shJs09KEtSAd3zed3GhVeYlyPkyE7cEPHqMgqYzmEICoU
-# mMvTtcHJMJ0QwGBHwSzqtAfXSzeLBjgHNSGjAKcFgDesQc3Af8Q09fRpw9C8sNGk
-# 93YtSymh9j0GzulCxUZrIR1F5sWqCIk0hci82UC2OZv6PMUU/rcGlqJHa2LxuRu4
-# qarqbEI+9IiTQxgJf0OU7j5QeqrA+2HsRezxF9FHZGPKCrbiB1jpxgj4KSN8VZXK
-# h8Dek4RTkdzoGz57Euib6fLbeGhz0JTUmfV/ntH8vLyXE7jLnFF4TkOZqz4lxS/O
-# 1XGyNy7JIcXGulJIApiWjUDlTf25iAmZgnsSE/bX9BaU/785/bbFdcM0TPMQdsfT
-# kRWWDGGAiOCGE1iqodmXGItdltJqwm20WOL8Gdp0SatXgeE+VUS5okaj5Pka0hF7
-# JDSECigbdr85wMBzWOtxJwF/QfhfswrpdgNCWPgnm0UNXXGRHo+xMeKLW3W9PmqE
-# ApXLuwmwQlqd0MB9do6Ej9FR0VfF8lgbewrviUSrxNcQprjS4Bz10khnXa4MXbaD
-# I9fO3qcZbf5l2WWZugcJ6ViUPGPy6l5uhFfeqFHNydfpCxNhvIHp9DOL4DeQYm7Q
-# aujoBd8SgE3PvAmGgrYl+XD3bHUfazweFfXIFmIfLAQuh2Ckxhwxkk9+FQ6hgg48
+# 9w0BCQQxIgQghkV9wFJU06Go0jd7fPagSzeond1V7DBGYEmyXshGMdwwDQYJKoZI
+# hvcNAQEBBQAEggIAQiY9/49uWjGdiy2Jmf1YPRLj7F87IHrQOcTHcEuhhZmszJQ4
+# x1624ArYVWIz0FJgqp5fq3jts04jV+rkzxaGIHt+C/R04VPXlE0+Ly/QfB5ewvZG
+# YPKcl9jCGUisJkXv9SkqZDh26CaJLceqUT6CiOLIP0ZdKuZAEXQEaXhaXoeiIJIO
+# nYXc+5u+RpuKDs9Hft3vM9Pu06wCFv+RfyoiCzx5cmoO3GaxPff1ywLQ9DWb2Squ
+# BdZDKubYWamlu3tjeJu9YjeQvhOED0HZphRPvozmLNJ1v7tN0JNZaE/WkqKPsK+p
+# NPT1T3S9lzqRTePNkhngoWwbMlW1RVLUSZnYtAsjEJ3ACobIIRxnymLP5OYmJXtT
+# pN6XV9YjdygreM0F0Q7+qJBgMNPNLMgiTkKhNwVDBwLl5dxqpeR9K1AbOrd3LnWN
+# /84PWAcUDsZZ3CMSzfUKX+M+X1COBbedCxcuoj1Kmtw7zKXZbxQ9e4rUO3PkpQxg
+# G8MySj+GxBxvkwZMR9f5fgbL8jaauv9ZYW2auWMoAHLeosc/hOSjCikZdpc0/5Pb
+# KejGN+G52p2bZsiG0oYI5g3wdMgK0/jzDtmtRk7vBOwFVcPajWk9dJVcZUWSO4Fx
+# NzWrgh6Zd3Nw8bESEkoVKl9sZ3BmZDMAIRMJeh9df88fdGMpphHSvax9iqmhgg48
 # MIIOOAYKKwYBBAGCNwMDATGCDigwgg4kBgkqhkiG9w0BBwKggg4VMIIOEQIBAzEN
 # MAsGCWCGSAFlAwQCATCCAQ4GCyqGSIb3DQEJEAEEoIH+BIH7MIH4AgEBBgtghkgB
-# hvhFAQcXAzAxMA0GCWCGSAFlAwQCAQUABCB+P2yrx7cKWTvcCTruQVFWqpmcXwUz
-# XmhaQNlqAtrkMQIUf2BkE0IGM0tE5oax6k7lml9bJDoYDzIwMjIwODEzMTQwODA1
+# hvhFAQcXAzAxMA0GCWCGSAFlAwQCAQUABCAuqPrJeyIXyKT4PoyMHW9VPNUbPdyd
+# 9x3e4MJmUjHYAgIUe0QNbKQftlVLV412+ojSFQPpR8UYDzIwMjMwMTI1MjAwMTEw
 # WjADAgEeoIGGpIGDMIGAMQswCQYDVQQGEwJVUzEdMBsGA1UEChMUU3ltYW50ZWMg
 # Q29ycG9yYXRpb24xHzAdBgNVBAsTFlN5bWFudGVjIFRydXN0IE5ldHdvcmsxMTAv
 # BgNVBAMTKFN5bWFudGVjIFNIQTI1NiBUaW1lU3RhbXBpbmcgU2lnbmVyIC0gRzOg
@@ -1366,13 +1420,13 @@ exit $ExitCode
 # A1UEChMUU3ltYW50ZWMgQ29ycG9yYXRpb24xHzAdBgNVBAsTFlN5bWFudGVjIFRy
 # dXN0IE5ldHdvcmsxKDAmBgNVBAMTH1N5bWFudGVjIFNIQTI1NiBUaW1lU3RhbXBp
 # bmcgQ0ECEHvU5a+6zAc/oQEjBCJBTRIwCwYJYIZIAWUDBAIBoIGkMBoGCSqGSIb3
-# DQEJAzENBgsqhkiG9w0BCRABBDAcBgkqhkiG9w0BCQUxDxcNMjIwODEzMTQwODA1
-# WjAvBgkqhkiG9w0BCQQxIgQgyzbGNEm17ASxjBAH4HbnUZ3Ej87pVzNjol1uN8+H
-# c8EwNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQgxHTOdgB9AjlODaXk3nwUxoD54oIB
-# PP72U+9dtx/fYfgwCwYJKoZIhvcNAQEBBIIBAGSG7BMFr8SAjmFSZlHc+OotF88R
-# eqD8KR5JpDeI+PibBbDKqakppSIAZiFpehkXM/FI9PZxoJ5FxsQXT5gMlYHpEyCY
-# tC5uGLxrYodpgAbTMoxCvfn3HpgQr7rTec/pyiRSrqgOX3eKbKo2IQA8t7T8QO9o
-# JNTGrQsXrURqKI1O8uBEdoqg85Pj0YbJkR3zwBs1kHKB7XixUHAPP75NpuBWRzpR
-# Ivx+mqun1nYau9MT5bZG0oXb8U103KvHv0odFcLwhSJjvhj+73kxjPbxY3ays3mR
-# 64hcdC5EuagKt5hlBk+CveTvAW33MEuXSSFVgQ/PZVPt1iQ1WVZtPMY81BY=
+# DQEJAzENBgsqhkiG9w0BCRABBDAcBgkqhkiG9w0BCQUxDxcNMjMwMTI1MjAwMTEw
+# WjAvBgkqhkiG9w0BCQQxIgQgc3vhzrShNhu9c86BzACvzjsyq6mGfUC5lnjnmheR
+# lXQwNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQgxHTOdgB9AjlODaXk3nwUxoD54oIB
+# PP72U+9dtx/fYfgwCwYJKoZIhvcNAQEBBIIBABFl9vc68ULyXJl07hEAx9S8cbMg
+# 3klf7ORGPe0ttXXsQZPldKylCAqT8XuJRZMAOYrMhMvG79N8LIETXvyhgyVdGGzy
+# rZkVIry6HXkAuZysJ+8xu4Oshf6NFMHs1ATTg2jLWBZ8r39GrUAu1oSL+q8laQE3
+# HvBvmWaM4Yv1/N1OdEHcgw2Zdxvy8P6g3bfNzv1SqMtf3Nn4TUv0RQZ5GJ9e8cfN
+# W19bcP37k5QR4AIuG3ItzEAyHppFYGM2bQ+X0KtWmWGpFeRd6Zd/pauS1PD7f87q
+# d7bG1jvjgyLAuxGxF/xSN/QizrOvWnV1Eya13mELBDNtg9UhUcxzmofj4Zw=
 # SIG # End signature block
